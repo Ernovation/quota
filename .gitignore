@@ -1,0 +1,11 @@
+# Build outputs
+quota-server
+quota-server.exe
+dist/
+
+# Runtime state
+state.json
+
+# Local editor settings
+.vscode/settings.json
+.vscode/*.local.json

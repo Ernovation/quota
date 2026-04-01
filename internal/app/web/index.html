@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quota Control</title>
+  <style>
+    :root {
+      --bg: #f4f2ea;
+      --card: #fffef8;
+      --ink: #10211f;
+      --muted: #5f6b68;
+      --accent: #0e7a53;
+      --danger: #ad2c2c;
+      --warn: #bc8400;
+      --line: #d9d4c7;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 15% 10%, #ece7d8 0, transparent 30%),
+        radial-gradient(circle at 85% 85%, #d6eadf 0, transparent 35%),
+        var(--bg);
+      min-height: 100vh;
+    }
+
+    .shell {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 20px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 10px 28px rgba(16, 33, 31, 0.08);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.8rem;
+      letter-spacing: 0.02em;
+    }
+
+    h2 {
+      margin-top: 0;
+      font-size: 1.1rem;
+    }
+
+    .row {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(12, 1fr);
+      align-items: end;
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+
+    .col-4 { grid-column: span 4; }
+    .col-6 { grid-column: span 6; }
+    .col-8 { grid-column: span 8; }
+    .col-12 { grid-column: span 12; }
+
+    label {
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+
+    input, select {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      font-size: 0.95rem;
+      width: 100%;
+      background: #fff;
+    }
+
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: transform 120ms ease, opacity 120ms ease;
+    }
+
+    button:hover { transform: translateY(-1px); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+
+    .btn-primary { background: var(--accent); color: white; }
+    .btn-neutral { background: #e6efe9; color: #0f2d27; }
+    .btn-danger { background: var(--danger); color: white; }
+
+    .stack { display: grid; gap: 10px; }
+    .inline { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+
+    .muted { color: var(--muted); }
+
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+
+    .ok { background: #d9f4ea; color: #0f5f43; }
+    .off { background: #f8e2e2; color: #7f2020; }
+
+    .msg {
+      min-height: 1.2em;
+      font-size: 0.92rem;
+      color: var(--warn);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.92rem;
+    }
+
+    th, td {
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      padding: 10px 6px;
+    }
+
+    th { color: var(--muted); font-weight: 600; }
+
+    .hidden { display: none !important; }
+
+    @media (max-width: 760px) {
+      .col-4, .col-6, .col-8, .col-12 { grid-column: span 12; }
+      .shell { padding: 12px; }
+      h1 { font-size: 1.5rem; }
+      table { font-size: 0.86rem; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="card">
+      <h1>Quota Control</h1>
+      <p class="muted">Control internet access per user with daily quotas.</p>
+    </section>
+
+    <section id="loginCard" class="card stack">
+      <h2>Login</h2>
+      <div class="row">
+        <div class="field col-6">
+          <label for="username">Username</label>
+          <input id="username" autocomplete="username" />
+        </div>
+        <div class="field col-6">
+          <label for="password">Password</label>
+          <input id="password" type="password" autocomplete="current-password" />
+        </div>
+      </div>
+      <div class="inline">
+        <button id="loginBtn" class="btn-primary">Log in</button>
+      </div>
+      <div id="loginMsg" class="msg"></div>
+    </section>
+
+    <section id="appCard" class="card stack hidden">
+      <div class="inline" style="justify-content: space-between;">
+        <div>
+          <h2 style="margin:0;">Account</h2>
+          <div id="meSummary" class="muted"></div>
+        </div>
+        <button id="logoutBtn" class="btn-neutral">Log out</button>
+      </div>
+
+      <div class="row">
+        <div class="field col-4">
+          <label>Internet</label>
+          <div id="internetState"></div>
+        </div>
+        <div class="field col-4">
+          <label>Quota</label>
+          <div id="quotaState"></div>
+        </div>
+        <div class="field col-4">
+          <label>Remaining</label>
+          <div id="remainingState"></div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field col-4">
+          <label>Carryover Cap</label>
+          <div id="carryoverCapState"></div>
+        </div>
+        <div class="field col-4">
+          <label>Carryover Available</label>
+          <div id="carryoverState"></div>
+        </div>
+        <div class="field col-4">
+          <label>Extra Today</label>
+          <div id="extraTodayState"></div>
+        </div>
+      </div>
+
+      <div class="inline">
+        <button id="onBtn" class="btn-primary">Turn Internet On</button>
+        <button id="offBtn" class="btn-danger">Turn Internet Off</button>
+      </div>
+      <div id="userMsg" class="msg"></div>
+    </section>
+
+    <section id="adminCard" class="card stack hidden">
+      <h2>Admin Panel</h2>
+
+      <div class="card" style="padding:12px;">
+        <h3 style="margin-top:0;">Create User</h3>
+        <div class="row">
+          <div class="field col-4">
+            <label for="newUsername">Username</label>
+            <input id="newUsername" />
+          </div>
+          <div class="field col-4">
+            <label for="newPassword">Password</label>
+            <input id="newPassword" type="password" />
+          </div>
+          <div class="field col-2">
+            <label for="newRole">Role</label>
+            <select id="newRole">
+              <option value="user">user</option>
+              <option value="admin">admin</option>
+            </select>
+          </div>
+          <div class="field col-2">
+            <label for="newQuota">Quota min/day</label>
+            <input id="newQuota" type="number" min="0" value="60" />
+          </div>
+          <div class="field col-2">
+            <label for="newCarryoverCap">Carryover cap min</label>
+            <input id="newCarryoverCap" type="number" min="0" value="0" />
+          </div>
+        </div>
+        <div class="inline">
+          <button id="createUserBtn" class="btn-primary">Create User</button>
+        </div>
+      </div>
+
+      <div class="card" style="padding:12px;">
+        <h3 style="margin-top:0;">Manage Existing User</h3>
+        <div class="row">
+          <div class="field col-4">
+            <label for="adminUsername">Username</label>
+            <input id="adminUsername" placeholder="existing username" />
+          </div>
+          <div class="field col-4">
+            <label for="adminQuota">New quota min/day</label>
+            <input id="adminQuota" type="number" min="0" value="60" />
+          </div>
+          <div class="field col-4">
+            <label for="adminPassword">New password</label>
+            <input id="adminPassword" type="password" />
+          </div>
+          <div class="field col-4">
+            <label for="adminCarryoverCap">Carryover cap min</label>
+            <input id="adminCarryoverCap" type="number" min="0" value="0" />
+          </div>
+          <div class="field col-4">
+            <label for="adminExtraMinutes">Today adjust min (+/-)</label>
+            <input id="adminExtraMinutes" type="number" value="15" />
+          </div>
+        </div>
+        <div class="inline">
+          <button id="setQuotaBtn" class="btn-neutral">Set Quota</button>
+          <button id="setCarryoverCapBtn" class="btn-neutral">Set Carryover Cap</button>
+          <button id="grantExtraBtn" class="btn-neutral">Adjust Today Minutes</button>
+          <button id="setPasswordBtn" class="btn-neutral">Set Password</button>
+          <button id="refreshUsersBtn" class="btn-neutral">Refresh Users</button>
+        </div>
+      </div>
+
+      <div class="card" style="padding:12px;">
+        <h3 style="margin-top:0;">Users</h3>
+        <div style="overflow:auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th>Role</th>
+                <th>Quota (min)</th>
+                <th>Carry Cap (min)</th>
+                <th>Carry (min)</th>
+                <th>Extra Today (min)</th>
+                <th>Used (min)</th>
+                <th>Remaining (min)</th>
+                <th>Internet</th>
+              </tr>
+            </thead>
+            <tbody id="usersBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="adminMsg" class="msg"></div>
+    </section>
+  </main>
+
+  <script>
+    function fmtMinutes(seconds) {
+      return Math.floor(seconds / 60);
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(path, {
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          ...(options.headers || {})
+        },
+        ...options
+      });
+
+      const text = await res.text();
+      let data = {};
+      if (text) {
+        try { data = JSON.parse(text); } catch (_) { data = { raw: text }; }
+      }
+
+      if (!res.ok) {
+        const msg = data.error || data.message || `Request failed (${res.status})`;
+        throw new Error(msg);
+      }
+      return data;
+    }
+
+    const state = {
+      me: null,
+      users: []
+    };
+
+    const loginCard = document.getElementById("loginCard");
+    const appCard = document.getElementById("appCard");
+    const adminCard = document.getElementById("adminCard");
+
+    const loginMsg = document.getElementById("loginMsg");
+    const userMsg = document.getElementById("userMsg");
+    const adminMsg = document.getElementById("adminMsg");
+
+    function setMsg(el, msg, isError = false) {
+      el.textContent = msg || "";
+      el.style.color = isError ? "#ad2c2c" : "#5f6b68";
+    }
+
+    function renderMe() {
+      if (!state.me) return;
+      document.getElementById("meSummary").textContent = `${state.me.username} (${state.me.role})`;
+      document.getElementById("internetState").innerHTML = state.me.internet_on
+        ? '<span class="badge ok">ON</span>'
+        : '<span class="badge off">OFF</span>';
+      document.getElementById("quotaState").textContent = `${state.me.daily_quota_minutes} min/day`;
+      document.getElementById("remainingState").textContent = `${fmtMinutes(state.me.remaining_seconds)} min`;
+      document.getElementById("carryoverCapState").textContent = `${state.me.carryover_cap_minutes} min`;
+      document.getElementById("carryoverState").textContent = `${fmtMinutes(state.me.carryover_seconds)} min`;
+      document.getElementById("extraTodayState").textContent = `${fmtMinutes(state.me.extra_seconds_today)} min`;
+      document.getElementById("onBtn").disabled = state.me.internet_on;
+      document.getElementById("offBtn").disabled = !state.me.internet_on;
+    }
+
+    function renderUsers() {
+      const body = document.getElementById("usersBody");
+      body.innerHTML = "";
+      for (const u of state.users) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${u.username}</td>
+          <td>${u.role}</td>
+          <td>${u.daily_quota_minutes}</td>
+          <td>${u.carryover_cap_minutes}</td>
+          <td>${fmtMinutes(u.carryover_seconds)}</td>
+          <td>${fmtMinutes(u.extra_seconds_today)}</td>
+          <td>${fmtMinutes(u.used_seconds)}</td>
+          <td>${fmtMinutes(u.remaining_seconds)}</td>
+          <td>${u.internet_on ? "ON" : "OFF"}</td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
+    async function loadMe() {
+      state.me = await api("/api/me", { method: "GET" });
+      renderMe();
+      loginCard.classList.add("hidden");
+      appCard.classList.remove("hidden");
+      if (state.me.role === "admin") {
+        adminCard.classList.remove("hidden");
+        await loadUsers();
+      } else {
+        adminCard.classList.add("hidden");
+      }
+    }
+
+    async function loadUsers() {
+      state.users = await api("/api/admin/users", { method: "GET" });
+      renderUsers();
+    }
+
+    async function tryRestoreSession() {
+      try {
+        await loadMe();
+      } catch (_) {
+        loginCard.classList.remove("hidden");
+        appCard.classList.add("hidden");
+        adminCard.classList.add("hidden");
+      }
+    }
+
+    document.getElementById("loginBtn").addEventListener("click", async () => {
+      setMsg(loginMsg, "");
+      try {
+        await api("/api/login", {
+          method: "POST",
+          body: JSON.stringify({
+            username: document.getElementById("username").value.trim(),
+            password: document.getElementById("password").value
+          })
+        });
+        await loadMe();
+      } catch (err) {
+        setMsg(loginMsg, err.message, true);
+      }
+    });
+
+    document.getElementById("logoutBtn").addEventListener("click", async () => {
+      try {
+        await api("/api/logout", { method: "POST" });
+      } finally {
+        location.reload();
+      }
+    });
+
+    document.getElementById("onBtn").addEventListener("click", async () => {
+      setMsg(userMsg, "");
+      try {
+        await api("/api/me/internet/on", { method: "POST" });
+        await loadMe();
+        setMsg(userMsg, "Internet enabled");
+      } catch (err) {
+        setMsg(userMsg, err.message, true);
+      }
+    });
+
+    document.getElementById("offBtn").addEventListener("click", async () => {
+      setMsg(userMsg, "");
+      try {
+        await api("/api/me/internet/off", { method: "POST" });
+        await loadMe();
+        setMsg(userMsg, "Internet disabled");
+      } catch (err) {
+        setMsg(userMsg, err.message, true);
+      }
+    });
+
+    document.getElementById("createUserBtn").addEventListener("click", async () => {
+      setMsg(adminMsg, "");
+      try {
+        await api("/api/admin/users", {
+          method: "POST",
+          body: JSON.stringify({
+            username: document.getElementById("newUsername").value.trim(),
+            password: document.getElementById("newPassword").value,
+            role: document.getElementById("newRole").value,
+            daily_quota_minutes: Number(document.getElementById("newQuota").value),
+            carryover_cap_minutes: Number(document.getElementById("newCarryoverCap").value)
+          })
+        });
+        await loadUsers();
+        setMsg(adminMsg, "User created");
+      } catch (err) {
+        setMsg(adminMsg, err.message, true);
+      }
+    });
+
+    document.getElementById("setQuotaBtn").addEventListener("click", async () => {
+      setMsg(adminMsg, "");
+      const user = document.getElementById("adminUsername").value.trim();
+      try {
+        await api(`/api/admin/users/${encodeURIComponent(user)}/quota`, {
+          method: "PUT",
+          body: JSON.stringify({
+            daily_quota_minutes: Number(document.getElementById("adminQuota").value)
+          })
+        });
+        await loadUsers();
+        if (state.me && state.me.username === user) {
+          await loadMe();
+        }
+        setMsg(adminMsg, "Quota updated");
+      } catch (err) {
+        setMsg(adminMsg, err.message, true);
+      }
+    });
+
+    document.getElementById("setPasswordBtn").addEventListener("click", async () => {
+      setMsg(adminMsg, "");
+      const user = document.getElementById("adminUsername").value.trim();
+      try {
+        await api(`/api/admin/users/${encodeURIComponent(user)}/password`, {
+          method: "PUT",
+          body: JSON.stringify({
+            password: document.getElementById("adminPassword").value
+          })
+        });
+        setMsg(adminMsg, "Password updated");
+      } catch (err) {
+        setMsg(adminMsg, err.message, true);
+      }
+    });
+
+    document.getElementById("setCarryoverCapBtn").addEventListener("click", async () => {
+      setMsg(adminMsg, "");
+      const user = document.getElementById("adminUsername").value.trim();
+      try {
+        await api(`/api/admin/users/${encodeURIComponent(user)}/carryover-cap`, {
+          method: "PUT",
+          body: JSON.stringify({
+            carryover_cap_minutes: Number(document.getElementById("adminCarryoverCap").value)
+          })
+        });
+        await loadUsers();
+        if (state.me && state.me.username === user) {
+          await loadMe();
+        }
+        setMsg(adminMsg, "Carryover cap updated");
+      } catch (err) {
+        setMsg(adminMsg, err.message, true);
+      }
+    });
+
+    document.getElementById("grantExtraBtn").addEventListener("click", async () => {
+      setMsg(adminMsg, "");
+      const user = document.getElementById("adminUsername").value.trim();
+      try {
+        await api(`/api/admin/users/${encodeURIComponent(user)}/extra-minutes`, {
+          method: "POST",
+          body: JSON.stringify({
+            minutes: Number(document.getElementById("adminExtraMinutes").value)
+          })
+        });
+        await loadUsers();
+        if (state.me && state.me.username === user) {
+          await loadMe();
+        }
+        setMsg(adminMsg, "Today minutes adjusted");
+      } catch (err) {
+        setMsg(adminMsg, err.message, true);
+      }
+    });
+
+    document.getElementById("refreshUsersBtn").addEventListener("click", async () => {
+      setMsg(adminMsg, "");
+      try {
+        await loadUsers();
+        setMsg(adminMsg, "Users refreshed");
+      } catch (err) {
+        setMsg(adminMsg, err.message, true);
+      }
+    });
+
+    setInterval(async () => {
+      if (!state.me) return;
+      try {
+        await loadMe();
+      } catch (_) {
+        location.reload();
+      }
+    }, 10000);
+
+    tryRestoreSession();
+  </script>
+</body>
+</html>
