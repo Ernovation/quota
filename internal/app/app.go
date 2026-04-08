@@ -61,9 +61,9 @@ type Config struct {
 }
 
 type App struct {
-	mu       sync.Mutex
-	state    persistedState
-	sessions map[string]Session
+	mu        sync.Mutex
+	state     persistedState
+	sessions  map[string]Session
 	quotaWake chan struct{}
 
 	stateFile  string
