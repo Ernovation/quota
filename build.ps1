@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("windows", "linux-amd64", "openwrt-mips", "openwrt-mipsle", "openwrt-arm64")]
+    [ValidateSet("windows", "linux-amd64", "openwrt-mips", "openwrt-mipsle", "openwrt-arm64", "openwrt-armv7")]
     [string]$Target = "windows",
     [string]$OutputDir = "$PSScriptRoot\dist"
 )
@@ -19,6 +19,11 @@ if ($null -ne $cmd) {
 
 if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir | Out-Null
+}
+
+$targetOutputDir = Join-Path $OutputDir $Target
+if (-not (Test-Path $targetOutputDir)) {
+    New-Item -ItemType Directory -Path $targetOutputDir | Out-Null
 }
 
 $envConfig = @{}
@@ -45,6 +50,10 @@ switch ($Target) {
         $envConfig = @{ GOOS = "linux"; GOARCH = "arm64"; CGO_ENABLED = "0" }
         $outputName = "quota-server"
     }
+    "openwrt-armv7" {
+        $envConfig = @{ GOOS = "linux"; GOARCH = "arm"; GOARM = "7"; CGO_ENABLED = "0" }
+        $outputName = "quota-server"
+    }
     default {
         throw "Unsupported target: $Target"
     }
@@ -60,7 +69,7 @@ Push-Location $PSScriptRoot
 try {
     & $goExe mod tidy
 
-    $outPath = Join-Path $OutputDir $outputName
+    $outPath = Join-Path $targetOutputDir $outputName
     & $goExe build -trimpath -ldflags "-s -w" -o $outPath ./cmd/server
 
     Write-Host "Built $Target binary: $outPath"
