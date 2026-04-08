@@ -64,6 +64,7 @@ type App struct {
 	mu       sync.Mutex
 	state    persistedState
 	sessions map[string]Session
+	quotaWake chan struct{}
 
 	stateFile  string
 	onScript   string
@@ -123,6 +124,7 @@ func New(cfg Config, logger *log.Logger) (*App, error) {
 		offScript:  cfg.OffScript,
 		sessionTTL: cfg.SessionTTL,
 		sessions:   make(map[string]Session),
+		quotaWake:  make(chan struct{}, 1),
 		logger:     logger,
 	}
 
@@ -177,14 +179,28 @@ func (a *App) Router() http.Handler {
 
 func (a *App) StartBackground(ctx context.Context) {
 	go func() {
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
+		a.enforceDueQuotas()
 		for {
+			delay := a.nextQuotaCheckDelay()
+			timer := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				return
-			case <-ticker.C:
-				a.enforceQuotas()
+			case <-a.quotaWake:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+			case <-timer.C:
+				a.enforceDueQuotas()
 			}
 		}
 	}()
@@ -266,6 +282,12 @@ func localDay(t time.Time) string {
 	return t.Local().Format("2006-01-02")
 }
 
+func nextLocalMidnight(now time.Time) time.Time {
+	localNow := now.Local()
+	y, m, d := localNow.Date()
+	return time.Date(y, m, d+1, 0, 0, 0, 0, localNow.Location())
+}
+
 func (a *App) totalAvailableSeconds(u *User) int64 {
 	return int64(u.DailyQuotaMinutes)*60 + u.CarryoverSeconds + u.ExtraSecondsToday
 }
@@ -281,10 +303,10 @@ func (a *App) currentUsedSeconds(u *User, nowUnix int64) int64 {
 	return used
 }
 
-func (a *App) rolloverIfNeededLocked(now time.Time) {
+func (a *App) rolloverIfNeededLocked(now time.Time) bool {
 	day := localDay(now)
 	if a.state.CurrentDay == day {
-		return
+		return false
 	}
 
 	nowUnix := now.Unix()
@@ -310,34 +332,67 @@ func (a *App) rolloverIfNeededLocked(now time.Time) {
 		}
 	}
 	a.state.CurrentDay = day
+	return true
 }
 
-func (a *App) enforceQuotas() {
+func (a *App) nextQuotaCheckDelay() time.Duration {
 	now := time.Now()
-	var toDisable []string
+	nowUnix := now.Unix()
+	soonest := nextLocalMidnight(now)
 
 	a.mu.Lock()
-	a.rolloverIfNeededLocked(now)
+	for _, u := range a.state.Users {
+		if !u.InternetOn {
+			continue
+		}
+		remaining := a.totalAvailableSeconds(u) - a.currentUsedSeconds(u, nowUnix)
+		if remaining <= 0 {
+			a.mu.Unlock()
+			return 0
+		}
+		deadline := time.Unix(nowUnix+remaining, 0)
+		if deadline.Before(soonest) {
+			soonest = deadline
+		}
+	}
+	a.mu.Unlock()
+
+	delay := time.Until(soonest)
+	if delay < 0 {
+		return 0
+	}
+	return delay
+}
+
+func (a *App) signalQuotaScheduler() {
+	select {
+	case a.quotaWake <- struct{}{}:
+	default:
+	}
+}
+
+func (a *App) enforceDueQuotas() {
+	now := time.Now()
+	var toDisable []string
+	shouldSave := false
+
+	a.mu.Lock()
+	if a.rolloverIfNeededLocked(now) {
+		shouldSave = true
+	}
 
 	for _, u := range a.state.Users {
 		if !u.InternetOn {
 			continue
 		}
-		if u.LastOnUnix == 0 {
-			u.LastOnUnix = now.Unix()
-			continue
-		}
-		delta := now.Unix() - u.LastOnUnix
-		if delta > 0 {
-			u.UsedSeconds += delta
-			u.LastOnUnix = now.Unix()
-		}
-		if u.UsedSeconds >= a.totalAvailableSeconds(u) {
+		if a.currentUsedSeconds(u, now.Unix()) >= a.totalAvailableSeconds(u) {
 			toDisable = append(toDisable, u.Username)
 		}
 	}
-	if err := a.saveLocked(); err != nil {
-		a.logger.Printf("failed to persist quota tick: %v", err)
+	if shouldSave {
+		if err := a.saveLocked(); err != nil {
+			a.logger.Printf("failed to persist scheduled rollover: %v", err)
+		}
 	}
 	a.mu.Unlock()
 
@@ -345,6 +400,21 @@ func (a *App) enforceQuotas() {
 		if err := a.disableInternet(username, "quota exhausted"); err != nil {
 			a.logger.Printf("auto-off failed for %s: %v", username, err)
 		}
+	}
+}
+
+func (a *App) syncUsageLocked(u *User, nowUnix int64) {
+	if !u.InternetOn {
+		return
+	}
+	if u.LastOnUnix == 0 {
+		u.LastOnUnix = nowUnix
+		return
+	}
+	delta := nowUnix - u.LastOnUnix
+	if delta > 0 {
+		u.UsedSeconds += delta
+		u.LastOnUnix = nowUnix
 	}
 }
 
@@ -399,7 +469,11 @@ func (a *App) enableInternet(username string) error {
 	}
 	u.InternetOn = true
 	u.LastOnUnix = time.Now().Unix()
-	return a.saveLocked()
+	if err := a.saveLocked(); err != nil {
+		return err
+	}
+	a.signalQuotaScheduler()
+	return nil
 }
 
 func (a *App) disableInternet(username, reason string) error {
@@ -425,12 +499,14 @@ func (a *App) disableInternet(username, reason string) error {
 	if !ok {
 		return errors.New("user not found")
 	}
+	a.syncUsageLocked(u, time.Now().Unix())
 	u.InternetOn = false
 	u.LastOnUnix = 0
 	if err := a.saveLocked(); err != nil {
 		return err
 	}
 	a.logger.Printf("internet disabled for %s (%s)", username, reason)
+	a.signalQuotaScheduler()
 	return nil
 }
 
@@ -620,7 +696,11 @@ func (a *App) createUser(username, password string, role Role, quotaMinutes, car
 		DailyQuotaMinutes:   quotaMinutes,
 		CarryoverCapMinutes: carryoverCapMinutes,
 	}
-	return a.saveLocked()
+	if err := a.saveLocked(); err != nil {
+		return err
+	}
+	a.signalQuotaScheduler()
+	return nil
 }
 
 func (a *App) setPassword(username, password string) error {
@@ -668,6 +748,7 @@ func (a *App) setQuota(username string, quotaMinutes int) error {
 			return err
 		}
 	}
+	a.signalQuotaScheduler()
 	return nil
 }
 
@@ -687,7 +768,11 @@ func (a *App) setCarryoverCap(username string, carryoverCapMinutes int) error {
 	if u.CarryoverSeconds > maxCarryover {
 		u.CarryoverSeconds = maxCarryover
 	}
-	return a.saveLocked()
+	if err := a.saveLocked(); err != nil {
+		return err
+	}
+	a.signalQuotaScheduler()
+	return nil
 }
 
 func (a *App) grantExtraMinutes(username string, minutes int) error {
@@ -714,6 +799,7 @@ func (a *App) grantExtraMinutes(username string, minutes int) error {
 			return err
 		}
 	}
+	a.signalQuotaScheduler()
 	return nil
 }
 
