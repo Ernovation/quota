@@ -1,0 +1,37 @@
+#!/bin/sh /etc/rc.common
+# OpenWrt procd init script for quota-server
+# Install: copy to /etc/init.d/quota-server and run:
+#   chmod +x /etc/init.d/quota-server
+#   /etc/init.d/quota-server enable
+#   /etc/init.d/quota-server start
+
+USE_PROCD=1
+START=95
+STOP=15
+
+PROG=/usr/bin/quota-server
+WORKDIR=/etc/quota-server
+
+start_service() {
+    mkdir -p "$WORKDIR"
+
+    procd_open_instance
+    procd_set_param command "$PROG"
+    procd_set_param dir "$WORKDIR"
+    procd_set_param env \
+        STATE_FILE="$WORKDIR/state.json" \
+        ON_SCRIPT="$WORKDIR/on.sh" \
+        OFF_SCRIPT="$WORKDIR/off.sh" \
+        ADDR=":8080" \
+        SESSION_TTL_HOURS="24"
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    # Restart automatically if the process exits unexpectedly.
+    # respawn threshold delay max_failures (0 = unlimited)
+    procd_set_param respawn 3600 5 0
+    procd_close_instance
+}
+
+service_triggers() {
+    procd_add_reload_trigger "quota-server"
+}
