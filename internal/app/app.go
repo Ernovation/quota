@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"strings"
 	"net/http"
 	"os"
 	"os/exec"
@@ -139,7 +140,12 @@ func (a *App) Router() http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Logger)
+	httpLog := log.New(&syslogWriter{
+		tag:      "quota-http",
+		priority: "daemon.info",
+		fallback: a.logger,
+	}, "", 0)
+	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: httpLog, NoColor: true}))
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -429,6 +435,36 @@ func (a *App) cleanupSessions() {
 	}
 }
 
+// syslogWriter is an io.Writer that sends each written line to the system
+// syslog via the `logger` utility with the given tag and priority.
+// If `logger` is unavailable it falls back to the provided logger.
+type syslogWriter struct {
+	tag      string
+	priority string
+	fallback *log.Logger
+}
+
+func (w *syslogWriter) Write(p []byte) (int, error) {
+	msg := strings.TrimRight(string(p), "\n")
+	if msg == "" {
+		return len(p), nil
+	}
+	if err := exec.Command("logger", "-t", w.tag, "-p", w.priority, msg).Run(); err != nil {
+		w.fallback.Print(msg)
+	}
+	return len(p), nil
+}
+
+// syslog writes a message to the system syslog via the `logger` utility.
+// This is available on OpenWrt (and any Linux/Unix system). On platforms
+// where `logger` is not present the message falls back to the app logger.
+func (a *App) syslog(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if err := exec.Command("logger", "-t", "quota-server", "-p", "daemon.info", msg).Run(); err != nil {
+		a.logger.Printf(msg)
+	}
+}
+
 func (a *App) runScript(path, username string) error {
 	cmd := exec.Command(path, username)
 	output, err := cmd.CombinedOutput()
@@ -472,6 +508,7 @@ func (a *App) enableInternet(username string) error {
 	if err := a.saveLocked(); err != nil {
 		return err
 	}
+	a.syslog("internet enabled for %s", username)
 	a.signalQuotaScheduler()
 	return nil
 }
@@ -505,7 +542,7 @@ func (a *App) disableInternet(username, reason string) error {
 	if err := a.saveLocked(); err != nil {
 		return err
 	}
-	a.logger.Printf("internet disabled for %s (%s)", username, reason)
+	a.syslog("internet disabled for %s (%s)", username, reason)
 	a.signalQuotaScheduler()
 	return nil
 }
