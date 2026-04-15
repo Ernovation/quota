@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,17 +31,35 @@ const (
 	RoleUser  Role = "user"
 )
 
+// CurfewWindow defines a daily period during which internet access is blocked
+// regardless of remaining quota. OffTime is when the block begins; OnTime is
+// when the user is allowed to turn internet back on. Both are "HH:MM" in
+// 24-hour local time. An empty OffTime means no curfew for that day.
+// If OnTime <= OffTime (or OnTime is empty) the window is treated as crossing
+// midnight (e.g. 22:00 → 07:00 next morning).
+type CurfewWindow struct {
+	OffTime string `json:"off_time"` // e.g. "22:00" — empty means no curfew
+	OnTime  string `json:"on_time"`  // e.g. "07:00"
+}
+
 type User struct {
-	Username            string `json:"username"`
-	PasswordHash        string `json:"password_hash"`
-	Role                Role   `json:"role"`
-	DailyQuotaMinutes   int    `json:"daily_quota_minutes"`
-	CarryoverCapMinutes int    `json:"carryover_cap_minutes"`
-	CarryoverSeconds    int64  `json:"carryover_seconds"`
-	ExtraSecondsToday   int64  `json:"extra_seconds_today"`
-	UsedSeconds         int64  `json:"used_seconds"`
-	InternetOn          bool   `json:"internet_on"`
-	LastOnUnix          int64  `json:"last_on_unix"`
+	Username     string `json:"username"`
+	PasswordHash string `json:"password_hash"`
+	Role         Role   `json:"role"`
+	// Per-day-of-week quota in minutes (index 0=Sunday … 6=Saturday).
+	WeeklyQuotaMinutes [7]int `json:"weekly_quota_minutes"`
+	// Per-day-of-week carryover cap in minutes.
+	WeeklyCarryoverCapMinutes [7]int `json:"weekly_carryover_cap_minutes"`
+	// Per-day-of-week curfew windows (0=Sunday … 6=Saturday).
+	WeeklyCurfew [7]CurfewWindow `json:"weekly_curfew"`
+	// Legacy scalar fields – populated when reading old state files; zeroed after migration.
+	OldDailyQuotaMinutes   int   `json:"daily_quota_minutes,omitempty"`
+	OldCarryoverCapMinutes int   `json:"carryover_cap_minutes,omitempty"`
+	CarryoverSeconds       int64 `json:"carryover_seconds"`
+	ExtraSecondsToday      int64 `json:"extra_seconds_today"`
+	UsedSeconds            int64 `json:"used_seconds"`
+	InternetOn             bool  `json:"internet_on"`
+	LastOnUnix             int64 `json:"last_on_unix"`
 }
 
 type persistedState struct {
@@ -87,16 +106,22 @@ type LoginRequest struct {
 var webFS embed.FS
 
 type UserResponse struct {
-	Username            string `json:"username"`
-	Role                Role   `json:"role"`
-	DailyQuotaMinutes   int    `json:"daily_quota_minutes"`
-	CarryoverCapMinutes int    `json:"carryover_cap_minutes"`
-	CarryoverSeconds    int64  `json:"carryover_seconds"`
-	ExtraSecondsToday   int64  `json:"extra_seconds_today"`
-	TotalSeconds        int64  `json:"total_seconds"`
-	UsedSeconds         int64  `json:"used_seconds"`
-	RemainingSeconds    int64  `json:"remaining_seconds"`
-	InternetOn          bool   `json:"internet_on"`
+	Username                  string          `json:"username"`
+	Role                      Role            `json:"role"`
+	WeeklyQuotaMinutes        [7]int          `json:"weekly_quota_minutes"`
+	WeeklyCarryoverCapMinutes [7]int          `json:"weekly_carryover_cap_minutes"`
+	WeeklyCurfew              [7]CurfewWindow `json:"weekly_curfew"`
+	// Convenience fields for the current day.
+	TodayQuotaMinutes        int          `json:"today_quota_minutes"`
+	TodayCarryoverCapMinutes int          `json:"today_carryover_cap_minutes"`
+	TodayCurfew              CurfewWindow `json:"today_curfew"`
+	InCurfew                 bool         `json:"in_curfew"`
+	CarryoverSeconds         int64        `json:"carryover_seconds"`
+	ExtraSecondsToday        int64        `json:"extra_seconds_today"`
+	TotalSeconds             int64        `json:"total_seconds"`
+	UsedSeconds              int64        `json:"used_seconds"`
+	RemainingSeconds         int64        `json:"remaining_seconds"`
+	InternetOn               bool         `json:"internet_on"`
 }
 
 func New(cfg Config, logger *log.Logger) (*App, error) {
@@ -166,6 +191,7 @@ func (a *App) Router() http.Handler {
 			r.Post("/users", a.handleAdminCreateUser)
 			r.Put("/users/{username}/quota", a.handleAdminSetQuota)
 			r.Put("/users/{username}/carryover-cap", a.handleAdminSetCarryoverCap)
+			r.Put("/users/{username}/curfew", a.handleAdminSetCurfew)
 			r.Post("/users/{username}/extra-minutes", a.handleAdminGrantExtraMinutes)
 			r.Put("/users/{username}/password", a.handleAdminSetPassword)
 		})
@@ -238,6 +264,7 @@ func (a *App) loadOrInitialize(initialAdminPassword string) error {
 		if st.Users == nil {
 			st.Users = make(map[string]*User)
 		}
+		migrateUsers(st.Users)
 		a.state = st
 		return nil
 	}
@@ -253,10 +280,11 @@ func (a *App) loadOrInitialize(initialAdminPassword string) error {
 		CurrentDay: localDay(time.Now()),
 		Users: map[string]*User{
 			"admin": {
-				Username:          "admin",
-				PasswordHash:      hash,
-				Role:              RoleAdmin,
-				DailyQuotaMinutes: 1440,
+				Username:                  "admin",
+				PasswordHash:              hash,
+				Role:                      RoleAdmin,
+				WeeklyQuotaMinutes:        [7]int{1440, 1440, 1440, 1440, 1440, 1440, 1440},
+				WeeklyCarryoverCapMinutes: [7]int{},
 			},
 		},
 	}
@@ -288,14 +316,150 @@ func localDay(t time.Time) string {
 	return t.Local().Format("2006-01-02")
 }
 
+// migrateUsers converts old scalar daily_quota_minutes / carryover_cap_minutes
+// fields (read from pre-weekly state files) into the new per-day-of-week arrays.
+// It zeroes the legacy fields after migration so they are not persisted again.
+func migrateUsers(users map[string]*User) {
+	for _, u := range users {
+		// Migrate quota.
+		if u.OldDailyQuotaMinutes > 0 {
+			allZero := true
+			for _, v := range u.WeeklyQuotaMinutes {
+				if v != 0 {
+					allZero = false
+					break
+				}
+			}
+			if allZero {
+				for i := range u.WeeklyQuotaMinutes {
+					u.WeeklyQuotaMinutes[i] = u.OldDailyQuotaMinutes
+				}
+			}
+			u.OldDailyQuotaMinutes = 0
+		}
+		// Migrate carryover cap.
+		if u.OldCarryoverCapMinutes > 0 {
+			allZero := true
+			for _, v := range u.WeeklyCarryoverCapMinutes {
+				if v != 0 {
+					allZero = false
+					break
+				}
+			}
+			if allZero {
+				for i := range u.WeeklyCarryoverCapMinutes {
+					u.WeeklyCarryoverCapMinutes[i] = u.OldCarryoverCapMinutes
+				}
+			}
+			u.OldCarryoverCapMinutes = 0
+		}
+	}
+}
+
 func nextLocalMidnight(now time.Time) time.Time {
 	localNow := now.Local()
 	y, m, d := localNow.Date()
 	return time.Date(y, m, d+1, 0, 0, 0, 0, localNow.Location())
 }
 
-func (a *App) totalAvailableSeconds(u *User) int64 {
-	return int64(u.DailyQuotaMinutes)*60 + u.CarryoverSeconds + u.ExtraSecondsToday
+// weekdayIndex returns the day-of-week index (0=Sunday … 6=Saturday) for the
+// local wall-clock time of t.
+func weekdayIndex(t time.Time) int {
+	return int(t.Local().Weekday())
+}
+
+// parseTOD parses an "HH:MM" string into hour and minute. ok is false on any
+// parse error or out-of-range value.
+func parseTOD(hhmm string) (hour, min int, ok bool) {
+	if len(hhmm) != 5 || hhmm[2] != ':' {
+		return 0, 0, false
+	}
+	h, err1 := strconv.Atoi(hhmm[:2])
+	m, err2 := strconv.Atoi(hhmm[3:])
+	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, 0, false
+	}
+	return h, m, true
+}
+
+// todayAt returns the time.Time for HH:MM on the same local calendar day as ref.
+func todayAt(ref time.Time, hour, min int) time.Time {
+	loc := ref.Local().Location()
+	y, mo, d := ref.Local().Date()
+	return time.Date(y, mo, d, hour, min, 0, 0, loc)
+}
+
+// curfewStatus reports whether now falls inside a curfew window and returns
+// the next curfew-related event time:
+//   - blocked=true  → nextEvent is when the curfew window ends (CurfewOn time)
+//   - blocked=false → nextEvent is when the next curfew window starts (or zero
+//     if no curfew is configured in the next 7 days)
+func curfewStatus(now time.Time, weekly [7]CurfewWindow) (blocked bool, nextEvent time.Time) {
+	loc := now.Local().Location()
+
+	// Check if we're still inside a curfew that started today or yesterday.
+	for daysBack := 0; daysBack <= 1; daysBack++ {
+		ref := now.Local().AddDate(0, 0, -daysBack)
+		wd := int(ref.Weekday())
+		w := weekly[wd]
+		if w.OffTime == "" {
+			continue
+		}
+		offH, offM, ok1 := parseTOD(w.OffTime)
+		onH, onM, ok2 := parseTOD(w.OnTime)
+		if !ok1 {
+			continue
+		}
+		y, mo, d := ref.Date()
+		offTime := time.Date(y, mo, d, offH, offM, 0, 0, loc)
+		if now.Before(offTime) {
+			continue // curfew hasn't started on this reference day yet
+		}
+		// Determine when the curfew window ends.
+		var onTime time.Time
+		if !ok2 {
+			// No OnTime configured: treat as crossing midnight with no defined end
+			// — use next midnight as the end so we don't block forever.
+			onTime = time.Date(y, mo, d+1, 0, 0, 0, 0, loc)
+		} else {
+			onTOD := onH*60 + onM
+			offTOD := offH*60 + offM
+			if onTOD <= offTOD {
+				// Crosses midnight: on-time is on the next calendar day.
+				onTime = time.Date(y, mo, d+1, onH, onM, 0, 0, loc)
+			} else {
+				onTime = time.Date(y, mo, d, onH, onM, 0, 0, loc)
+			}
+		}
+		if now.Before(onTime) {
+			return true, onTime
+		}
+		// This curfew window has already ended; keep checking.
+	}
+
+	// Not blocked. Find the next curfew-off event within the next 7 days.
+	for daysAhead := 0; daysAhead <= 7; daysAhead++ {
+		ref := now.Local().AddDate(0, 0, daysAhead)
+		wd := int(ref.Weekday())
+		w := weekly[wd]
+		if w.OffTime == "" {
+			continue
+		}
+		offH, offM, ok := parseTOD(w.OffTime)
+		if !ok {
+			continue
+		}
+		y, mo, d := ref.Date()
+		offTime := time.Date(y, mo, d, offH, offM, 0, 0, loc)
+		if offTime.After(now) {
+			return false, offTime
+		}
+	}
+	return false, time.Time{}
+}
+
+func (a *App) totalAvailableSeconds(u *User, now time.Time) int64 {
+	return int64(u.WeeklyQuotaMinutes[weekdayIndex(now)])*60 + u.CarryoverSeconds + u.ExtraSecondsToday
 }
 
 func (a *App) currentUsedSeconds(u *User, nowUnix int64) int64 {
@@ -315,15 +479,23 @@ func (a *App) rolloverIfNeededLocked(now time.Time) bool {
 		return false
 	}
 
+	// Determine the weekday of the day that just ended so we can use its
+	// per-day quota and carryover cap when computing how much carries forward.
+	prevLoc := now.Local().Location()
+	prevDay, _ := time.ParseInLocation("2006-01-02", a.state.CurrentDay, prevLoc)
+	prevWD := int(prevDay.Weekday())
+
 	nowUnix := now.Unix()
 	for _, u := range a.state.Users {
 		used := a.currentUsedSeconds(u, nowUnix)
-		total := a.totalAvailableSeconds(u)
+		// Total is computed against the day that just ended.
+		total := int64(u.WeeklyQuotaMinutes[prevWD])*60 + u.CarryoverSeconds + u.ExtraSecondsToday
 		remaining := total - used
 		if remaining < 0 {
 			remaining = 0
 		}
-		carryCapSeconds := int64(u.CarryoverCapMinutes) * 60
+		// The carryover cap is also per-day, using the day that just ended.
+		carryCapSeconds := int64(u.WeeklyCarryoverCapMinutes[prevWD]) * 60
 		if remaining > carryCapSeconds {
 			remaining = carryCapSeconds
 		}
@@ -348,10 +520,16 @@ func (a *App) nextQuotaCheckDelay() time.Duration {
 
 	a.mu.Lock()
 	for _, u := range a.state.Users {
+		// Check curfew events for all users (online or offline).
+		_, nextCurfew := curfewStatus(now, u.WeeklyCurfew)
+		if !nextCurfew.IsZero() && nextCurfew.Before(soonest) {
+			soonest = nextCurfew
+		}
+
 		if !u.InternetOn {
 			continue
 		}
-		remaining := a.totalAvailableSeconds(u) - a.currentUsedSeconds(u, nowUnix)
+		remaining := a.totalAvailableSeconds(u, now) - a.currentUsedSeconds(u, nowUnix)
 		if remaining <= 0 {
 			a.mu.Unlock()
 			return 0
@@ -379,7 +557,11 @@ func (a *App) signalQuotaScheduler() {
 
 func (a *App) enforceDueQuotas() {
 	now := time.Now()
-	var toDisable []string
+	type disableEntry struct {
+		username string
+		reason   string
+	}
+	var toDisable []disableEntry
 	shouldSave := false
 
 	a.mu.Lock()
@@ -391,8 +573,13 @@ func (a *App) enforceDueQuotas() {
 		if !u.InternetOn {
 			continue
 		}
-		if a.currentUsedSeconds(u, now.Unix()) >= a.totalAvailableSeconds(u) {
-			toDisable = append(toDisable, u.Username)
+		blocked, _ := curfewStatus(now, u.WeeklyCurfew)
+		if blocked {
+			toDisable = append(toDisable, disableEntry{u.Username, "curfew"})
+			continue
+		}
+		if a.currentUsedSeconds(u, now.Unix()) >= a.totalAvailableSeconds(u, now) {
+			toDisable = append(toDisable, disableEntry{u.Username, "quota exhausted"})
 		}
 	}
 	if shouldSave {
@@ -402,9 +589,9 @@ func (a *App) enforceDueQuotas() {
 	}
 	a.mu.Unlock()
 
-	for _, username := range toDisable {
-		if err := a.disableInternet(username, "quota exhausted"); err != nil {
-			a.logger.Printf("auto-off failed for %s: %v", username, err)
+	for _, e := range toDisable {
+		if err := a.disableInternet(e.username, e.reason); err != nil {
+			a.logger.Printf("auto-off failed for %s: %v", e.username, err)
 		}
 	}
 }
@@ -487,7 +674,14 @@ func (a *App) enableInternet(username string) error {
 		a.mu.Unlock()
 		return nil
 	}
-	if a.currentUsedSeconds(u, now.Unix()) >= a.totalAvailableSeconds(u) {
+	if blocked, onTime := curfewStatus(now, u.WeeklyCurfew); blocked {
+		a.mu.Unlock()
+		if !onTime.IsZero() {
+			return fmt.Errorf("internet is blocked by curfew until %s", onTime.Local().Format("15:04"))
+		}
+		return errors.New("internet is blocked by curfew")
+	}
+	if a.currentUsedSeconds(u, now.Unix()) >= a.totalAvailableSeconds(u, now) {
 		a.mu.Unlock()
 		return errors.New("daily quota already exhausted")
 	}
@@ -650,69 +844,102 @@ func authenticatedUsername(ctx context.Context) string {
 func (a *App) userResponse(username string) (UserResponse, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.rolloverIfNeededLocked(time.Now())
+	now := time.Now()
+	a.rolloverIfNeededLocked(now)
 	u, ok := a.state.Users[username]
 	if !ok {
 		return UserResponse{}, errors.New("user not found")
 	}
-	used := a.currentUsedSeconds(u, time.Now().Unix())
-	total := a.totalAvailableSeconds(u)
+	used := a.currentUsedSeconds(u, now.Unix())
+	total := a.totalAvailableSeconds(u, now)
 	remaining := total - used
 	if remaining < 0 {
 		remaining = 0
 	}
+	wd := weekdayIndex(now)
+	inCurfew, _ := curfewStatus(now, u.WeeklyCurfew)
 	return UserResponse{
-		Username:            u.Username,
-		Role:                u.Role,
-		DailyQuotaMinutes:   u.DailyQuotaMinutes,
-		CarryoverCapMinutes: u.CarryoverCapMinutes,
-		CarryoverSeconds:    u.CarryoverSeconds,
-		ExtraSecondsToday:   u.ExtraSecondsToday,
-		TotalSeconds:        total,
-		UsedSeconds:         used,
-		RemainingSeconds:    remaining,
-		InternetOn:          u.InternetOn,
+		Username:                  u.Username,
+		Role:                      u.Role,
+		WeeklyQuotaMinutes:        u.WeeklyQuotaMinutes,
+		WeeklyCarryoverCapMinutes: u.WeeklyCarryoverCapMinutes,
+		WeeklyCurfew:              u.WeeklyCurfew,
+		TodayQuotaMinutes:         u.WeeklyQuotaMinutes[wd],
+		TodayCarryoverCapMinutes:  u.WeeklyCarryoverCapMinutes[wd],
+		TodayCurfew:               u.WeeklyCurfew[wd],
+		InCurfew:                  inCurfew,
+		CarryoverSeconds:          u.CarryoverSeconds,
+		ExtraSecondsToday:         u.ExtraSecondsToday,
+		TotalSeconds:              total,
+		UsedSeconds:               used,
+		RemainingSeconds:          remaining,
+		InternetOn:                u.InternetOn,
 	}, nil
 }
 
 func (a *App) listUsers() []UserResponse {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.rolloverIfNeededLocked(time.Now())
+	now := time.Now()
+	a.rolloverIfNeededLocked(now)
 	responses := make([]UserResponse, 0, len(a.state.Users))
-	now := time.Now().Unix()
+	nowUnix := now.Unix()
+	wd := weekdayIndex(now)
 	for _, u := range a.state.Users {
-		used := a.currentUsedSeconds(u, now)
-		total := a.totalAvailableSeconds(u)
+		used := a.currentUsedSeconds(u, nowUnix)
+		total := a.totalAvailableSeconds(u, now)
 		remaining := total - used
 		if remaining < 0 {
 			remaining = 0
 		}
+		inCurfew, _ := curfewStatus(now, u.WeeklyCurfew)
 		responses = append(responses, UserResponse{
-			Username:            u.Username,
-			Role:                u.Role,
-			DailyQuotaMinutes:   u.DailyQuotaMinutes,
-			CarryoverCapMinutes: u.CarryoverCapMinutes,
-			CarryoverSeconds:    u.CarryoverSeconds,
-			ExtraSecondsToday:   u.ExtraSecondsToday,
-			TotalSeconds:        total,
-			UsedSeconds:         used,
-			RemainingSeconds:    remaining,
-			InternetOn:          u.InternetOn,
+			Username:                  u.Username,
+			Role:                      u.Role,
+			WeeklyQuotaMinutes:        u.WeeklyQuotaMinutes,
+			WeeklyCarryoverCapMinutes: u.WeeklyCarryoverCapMinutes,
+			WeeklyCurfew:              u.WeeklyCurfew,
+			TodayQuotaMinutes:         u.WeeklyQuotaMinutes[wd],
+			TodayCarryoverCapMinutes:  u.WeeklyCarryoverCapMinutes[wd],
+			TodayCurfew:               u.WeeklyCurfew[wd],
+			InCurfew:                  inCurfew,
+			CarryoverSeconds:          u.CarryoverSeconds,
+			ExtraSecondsToday:         u.ExtraSecondsToday,
+			TotalSeconds:              total,
+			UsedSeconds:               used,
+			RemainingSeconds:          remaining,
+			InternetOn:                u.InternetOn,
 		})
 	}
 	return responses
 }
 
-func (a *App) createUser(username, password string, role Role, quotaMinutes, carryoverCapMinutes int) error {
+func (a *App) createUser(username, password string, role Role, weeklyQuotaMinutes, weeklyCarryoverCapMinutes [7]int, weeklyCurfew [7]CurfewWindow) error {
 	if username == "" || password == "" {
 		return errors.New("username and password required")
 	}
-	if quotaMinutes < 0 {
-		return errors.New("quota must be >= 0")
+	for _, m := range weeklyQuotaMinutes {
+		if m < 0 {
+			return errors.New("quota must be >= 0")
+		}
 	}
-	if carryoverCapMinutes < 0 {
-		return errors.New("carryover cap must be >= 0")
+	for _, m := range weeklyCarryoverCapMinutes {
+		if m < 0 {
+			return errors.New("carryover cap must be >= 0")
+		}
+	}
+	for i, w := range weeklyCurfew {
+		if w.OffTime == "" {
+			continue
+		}
+		if _, _, ok := parseTOD(w.OffTime); !ok {
+			return fmt.Errorf("day %d: invalid curfew off_time %q", i, w.OffTime)
+		}
+		if w.OnTime != "" {
+			if _, _, ok := parseTOD(w.OnTime); !ok {
+				return fmt.Errorf("day %d: invalid curfew on_time %q", i, w.OnTime)
+			}
+		}
 	}
 	if role != RoleAdmin && role != RoleUser {
 		return errors.New("invalid role")
@@ -727,11 +954,12 @@ func (a *App) createUser(username, password string, role Role, quotaMinutes, car
 		return errors.New("user already exists")
 	}
 	a.state.Users[username] = &User{
-		Username:            username,
-		PasswordHash:        hash,
-		Role:                role,
-		DailyQuotaMinutes:   quotaMinutes,
-		CarryoverCapMinutes: carryoverCapMinutes,
+		Username:                  username,
+		PasswordHash:              hash,
+		Role:                      role,
+		WeeklyQuotaMinutes:        weeklyQuotaMinutes,
+		WeeklyCarryoverCapMinutes: weeklyCarryoverCapMinutes,
+		WeeklyCurfew:              weeklyCurfew,
 	}
 	if err := a.saveLocked(); err != nil {
 		return err
@@ -758,20 +986,23 @@ func (a *App) setPassword(username, password string) error {
 	return a.saveLocked()
 }
 
-func (a *App) setQuota(username string, quotaMinutes int) error {
-	if quotaMinutes < 0 {
-		return errors.New("quota must be >= 0")
+func (a *App) setWeeklyQuota(username string, weeklyMinutes [7]int) error {
+	for _, m := range weeklyMinutes {
+		if m < 0 {
+			return errors.New("quota must be >= 0")
+		}
 	}
 	shouldDisable := false
 	a.mu.Lock()
-	a.rolloverIfNeededLocked(time.Now())
+	now := time.Now()
+	a.rolloverIfNeededLocked(now)
 	u, ok := a.state.Users[username]
 	if !ok {
 		a.mu.Unlock()
 		return errors.New("user not found")
 	}
-	u.DailyQuotaMinutes = quotaMinutes
-	if u.InternetOn && a.currentUsedSeconds(u, time.Now().Unix()) >= a.totalAvailableSeconds(u) {
+	u.WeeklyQuotaMinutes = weeklyMinutes
+	if u.InternetOn && a.currentUsedSeconds(u, now.Unix()) >= a.totalAvailableSeconds(u, now) {
 		shouldDisable = true
 	}
 	if err := a.saveLocked(); err != nil {
@@ -789,19 +1020,23 @@ func (a *App) setQuota(username string, quotaMinutes int) error {
 	return nil
 }
 
-func (a *App) setCarryoverCap(username string, carryoverCapMinutes int) error {
-	if carryoverCapMinutes < 0 {
-		return errors.New("carryover cap must be >= 0")
+func (a *App) setWeeklyCarryoverCap(username string, weeklyCapMinutes [7]int) error {
+	for _, m := range weeklyCapMinutes {
+		if m < 0 {
+			return errors.New("carryover cap must be >= 0")
+		}
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.rolloverIfNeededLocked(time.Now())
+	now := time.Now()
+	a.rolloverIfNeededLocked(now)
 	u, ok := a.state.Users[username]
 	if !ok {
 		return errors.New("user not found")
 	}
-	u.CarryoverCapMinutes = carryoverCapMinutes
-	maxCarryover := int64(carryoverCapMinutes) * 60
+	u.WeeklyCarryoverCapMinutes = weeklyCapMinutes
+	// Clamp existing carryover to today's new cap to avoid immediate excess.
+	maxCarryover := int64(weeklyCapMinutes[weekdayIndex(now)]) * 60
 	if u.CarryoverSeconds > maxCarryover {
 		u.CarryoverSeconds = maxCarryover
 	}
@@ -812,17 +1047,63 @@ func (a *App) setCarryoverCap(username string, carryoverCapMinutes int) error {
 	return nil
 }
 
+func (a *App) setCurfew(username string, weekly [7]CurfewWindow) error {
+	// Validate all provided windows.
+	for i, w := range weekly {
+		if w.OffTime == "" {
+			continue // no curfew for this day — OK
+		}
+		if _, _, ok := parseTOD(w.OffTime); !ok {
+			return fmt.Errorf("day %d: invalid off_time %q (expected HH:MM)", i, w.OffTime)
+		}
+		if w.OnTime != "" {
+			if _, _, ok := parseTOD(w.OnTime); !ok {
+				return fmt.Errorf("day %d: invalid on_time %q (expected HH:MM)", i, w.OnTime)
+			}
+		}
+	}
+
+	shouldDisable := false
+	now := time.Now()
+	a.mu.Lock()
+	u, ok := a.state.Users[username]
+	if !ok {
+		a.mu.Unlock()
+		return errors.New("user not found")
+	}
+	u.WeeklyCurfew = weekly
+	if u.InternetOn {
+		if blocked, _ := curfewStatus(now, u.WeeklyCurfew); blocked {
+			shouldDisable = true
+		}
+	}
+	if err := a.saveLocked(); err != nil {
+		a.mu.Unlock()
+		return err
+	}
+	a.mu.Unlock()
+
+	if shouldDisable {
+		if err := a.disableInternet(username, "curfew"); err != nil {
+			return err
+		}
+	}
+	a.signalQuotaScheduler()
+	return nil
+}
+
 func (a *App) grantExtraMinutes(username string, minutes int) error {
 	shouldDisable := false
+	now := time.Now()
 	a.mu.Lock()
-	a.rolloverIfNeededLocked(time.Now())
+	a.rolloverIfNeededLocked(now)
 	u, ok := a.state.Users[username]
 	if !ok {
 		a.mu.Unlock()
 		return errors.New("user not found")
 	}
 	u.ExtraSecondsToday += int64(minutes) * 60
-	if u.InternetOn && a.currentUsedSeconds(u, time.Now().Unix()) >= a.totalAvailableSeconds(u) {
+	if u.InternetOn && a.currentUsedSeconds(u, now.Unix()) >= a.totalAvailableSeconds(u, now) {
 		shouldDisable = true
 	}
 	if err := a.saveLocked(); err != nil {
@@ -911,11 +1192,12 @@ func (a *App) handleMyInternetOff(w http.ResponseWriter, r *http.Request) {
 }
 
 type createUserRequest struct {
-	Username            string `json:"username"`
-	Password            string `json:"password"`
-	Role                Role   `json:"role"`
-	DailyQuotaMinutes   int    `json:"daily_quota_minutes"`
-	CarryoverCapMinutes int    `json:"carryover_cap_minutes"`
+	Username                  string          `json:"username"`
+	Password                  string          `json:"password"`
+	Role                      Role            `json:"role"`
+	WeeklyQuotaMinutes        [7]int          `json:"weekly_quota_minutes"`
+	WeeklyCarryoverCapMinutes [7]int          `json:"weekly_carryover_cap_minutes"`
+	WeeklyCurfew              [7]CurfewWindow `json:"weekly_curfew"`
 }
 
 func (a *App) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
@@ -927,7 +1209,7 @@ func (a *App) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	if req.Role == "" {
 		req.Role = RoleUser
 	}
-	if err := a.createUser(req.Username, req.Password, req.Role, req.DailyQuotaMinutes, req.CarryoverCapMinutes); err != nil {
+	if err := a.createUser(req.Username, req.Password, req.Role, req.WeeklyQuotaMinutes, req.WeeklyCarryoverCapMinutes, req.WeeklyCurfew); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -938,26 +1220,44 @@ func (a *App) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a.listUsers())
 }
 
-type setQuotaRequest struct {
-	DailyQuotaMinutes int `json:"daily_quota_minutes"`
+type setWeeklyQuotaRequest struct {
+	WeeklyQuotaMinutes [7]int `json:"weekly_quota_minutes"`
 }
 
-type setCarryoverCapRequest struct {
-	CarryoverCapMinutes int `json:"carryover_cap_minutes"`
+type setWeeklyCarryoverCapRequest struct {
+	WeeklyCarryoverCapMinutes [7]int `json:"weekly_carryover_cap_minutes"`
 }
 
 type grantExtraMinutesRequest struct {
 	Minutes int `json:"minutes"`
 }
 
-func (a *App) handleAdminSetQuota(w http.ResponseWriter, r *http.Request) {
+type setCurfewRequest struct {
+	WeeklyCurfew [7]CurfewWindow `json:"weekly_curfew"`
+}
+
+func (a *App) handleAdminSetCurfew(w http.ResponseWriter, r *http.Request) {
 	username := chi.URLParam(r, "username")
-	var req setQuotaRequest
+	var req setCurfewRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if err := a.setQuota(username, req.DailyQuotaMinutes); err != nil {
+	if err := a.setCurfew(username, req.WeeklyCurfew); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "curfew updated"})
+}
+
+func (a *App) handleAdminSetQuota(w http.ResponseWriter, r *http.Request) {
+	username := chi.URLParam(r, "username")
+	var req setWeeklyQuotaRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if err := a.setWeeklyQuota(username, req.WeeklyQuotaMinutes); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -966,12 +1266,12 @@ func (a *App) handleAdminSetQuota(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleAdminSetCarryoverCap(w http.ResponseWriter, r *http.Request) {
 	username := chi.URLParam(r, "username")
-	var req setCarryoverCapRequest
+	var req setWeeklyCarryoverCapRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if err := a.setCarryoverCap(username, req.CarryoverCapMinutes); err != nil {
+	if err := a.setWeeklyCarryoverCap(username, req.WeeklyCarryoverCapMinutes); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

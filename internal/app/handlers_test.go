@@ -110,7 +110,7 @@ func TestLogoutInvalidatesSession(t *testing.T) {
 
 func TestAdminEndpointForbiddenForNonAdmin(t *testing.T) {
 	a := newTestApp(t)
-	if err := a.createUser("alice", "pw", RoleUser, 60, 30); err != nil {
+	if err := a.createUser("alice", "pw", RoleUser, [7]int{60, 60, 60, 60, 60, 60, 60}, [7]int{30, 30, 30, 30, 30, 30, 30}, [7]CurfewWindow{}); err != nil {
 		t.Fatalf("createUser error = %v", err)
 	}
 	h := a.Router()
@@ -139,7 +139,7 @@ func TestAdminCreateUserAndList(t *testing.T) {
 		t.Fatalf("admin login failed: status=%d cookieNil=%v", status, adminCookie == nil)
 	}
 
-	createBody := []byte(`{"username":"bob","password":"pw","role":"user","daily_quota_minutes":90,"carryover_cap_minutes":15}`)
+	createBody := []byte(`{"username":"bob","password":"pw","role":"user","weekly_quota_minutes":[90,90,90,90,90,90,90],"weekly_carryover_cap_minutes":[15,15,15,15,15,15,15]}`)
 	createReq := httptest.NewRequest(http.MethodPost, "/api/admin/users", bytes.NewReader(createBody))
 	createReq.Header.Set("Content-Type", "application/json")
 	createReq.AddCookie(adminCookie)
@@ -167,11 +167,11 @@ func TestAdminCreateUserAndList(t *testing.T) {
 	for _, u := range users {
 		if u.Username == "bob" {
 			found = true
-			if u.DailyQuotaMinutes != 90 {
-				t.Fatalf("bob quota = %d, want %d", u.DailyQuotaMinutes, 90)
+			if u.TodayQuotaMinutes != 90 {
+				t.Fatalf("bob quota = %d, want %d", u.TodayQuotaMinutes, 90)
 			}
-			if u.CarryoverCapMinutes != 15 {
-				t.Fatalf("bob carryover cap = %d, want %d", u.CarryoverCapMinutes, 15)
+			if u.TodayCarryoverCapMinutes != 15 {
+				t.Fatalf("bob carryover cap = %d, want %d", u.TodayCarryoverCapMinutes, 15)
 			}
 		}
 	}
@@ -276,7 +276,7 @@ func TestAdminSetQuotaRejectsNegativeValue(t *testing.T) {
 		t.Fatalf("admin login failed: status=%d cookieNil=%v", status, adminCookie == nil)
 	}
 
-	body := []byte(`{"daily_quota_minutes":-1}`)
+	body := []byte(`{"weekly_quota_minutes":[-1,0,0,0,0,0,0]}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/admin/users/admin/quota", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(adminCookie)
@@ -317,7 +317,7 @@ func TestAdminSetCarryoverCapRejectsNegativeValue(t *testing.T) {
 		t.Fatalf("admin login failed: status=%d cookieNil=%v", status, adminCookie == nil)
 	}
 
-	body := []byte(`{"carryover_cap_minutes":-1}`)
+	body := []byte(`{"weekly_carryover_cap_minutes":[-1,0,0,0,0,0,0]}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/admin/users/admin/carryover-cap", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(adminCookie)
@@ -379,7 +379,7 @@ func TestAdminSetQuotaRejectsUnknownUser(t *testing.T) {
 		t.Fatalf("admin login failed: status=%d cookieNil=%v", status, adminCookie == nil)
 	}
 
-	body := []byte(`{"daily_quota_minutes":15}`)
+	body := []byte(`{"weekly_quota_minutes":[15,15,15,15,15,15,15]}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/admin/users/missing-user/quota", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(adminCookie)

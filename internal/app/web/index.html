@@ -147,6 +147,66 @@
       h1 { font-size: 1.5rem; }
       table { font-size: 0.86rem; }
     }
+
+    .week-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .week-grid {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 5px;
+    }
+
+    .week-grid .day-cell {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+    }
+
+    .week-grid .day-cell label {
+      font-size: 0.76rem;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .week-grid .day-cell input {
+      text-align: center;
+      padding: 7px 2px;
+      font-size: 0.84rem;
+    }
+
+    tr.selectable { cursor: pointer; }
+    tr.selectable:hover td { background: #f0f8f4; }
+    tr.row-selected td { background: #d9f4ea; }
+
+    .curfew-row {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 5px;
+    }
+
+    .curfew-row .day-cell {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+    }
+
+    .curfew-row .day-cell .sub-label {
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+
+    .curfew-row .day-cell input[type="time"] {
+      width: 100%;
+      padding: 5px 2px;
+      font-size: 0.82rem;
+      text-align: center;
+    }
   </style>
 </head>
 <body>
@@ -189,7 +249,7 @@
           <div id="internetState"></div>
         </div>
         <div class="field col-4">
-          <label>Quota</label>
+          <label>Today's Quota</label>
           <div id="quotaState"></div>
         </div>
         <div class="field col-4">
@@ -199,7 +259,7 @@
       </div>
       <div class="row">
         <div class="field col-4">
-          <label>Carryover Cap</label>
+          <label>Today's Carryover Cap</label>
           <div id="carryoverCapState"></div>
         </div>
         <div class="field col-4">
@@ -209,6 +269,16 @@
         <div class="field col-4">
           <label>Extra Today</label>
           <div id="extraTodayState"></div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field col-4">
+          <label>Curfew</label>
+          <div id="curfewState"></div>
+        </div>
+        <div class="field col-8">
+          <label>Today’s Curfew Window (Off → On)</label>
+          <div id="curfewWindowState"></div>
         </div>
       </div>
 
@@ -240,13 +310,23 @@
               <option value="admin">admin</option>
             </select>
           </div>
-          <div class="field col-2">
-            <label for="newQuota">Quota min/day</label>
-            <input id="newQuota" type="number" min="0" value="60" />
+          <div class="field col-12">
+            <div class="week-group">
+              <label>Quota (min/day) — Sun · Mon · Tue · Wed · Thu · Fri · Sat</label>
+              <div class="week-grid" id="newQuotaGrid"></div>
+            </div>
           </div>
-          <div class="field col-2">
-            <label for="newCarryoverCap">Carryover cap min</label>
-            <input id="newCarryoverCap" type="number" min="0" value="0" />
+          <div class="field col-12">
+            <div class="week-group">
+              <label>Carryover cap (min/day) — Sun · Mon · Tue · Wed · Thu · Fri · Sat</label>
+              <div class="week-grid" id="newCapGrid"></div>
+            </div>
+          </div>
+          <div class="field col-12">
+            <div class="week-group">
+              <label>Curfew — Off &amp; On time per day (leave Off empty for no curfew that day)</label>
+              <div class="curfew-row" id="newCurfewGrid"></div>
+            </div>
           </div>
         </div>
         <div class="inline">
@@ -262,25 +342,36 @@
             <input id="adminUsername" placeholder="existing username" />
           </div>
           <div class="field col-4">
-            <label for="adminQuota">New quota min/day</label>
-            <input id="adminQuota" type="number" min="0" value="60" />
-          </div>
-          <div class="field col-4">
             <label for="adminPassword">New password</label>
             <input id="adminPassword" type="password" />
-          </div>
-          <div class="field col-4">
-            <label for="adminCarryoverCap">Carryover cap min</label>
-            <input id="adminCarryoverCap" type="number" min="0" value="0" />
           </div>
           <div class="field col-4">
             <label for="adminExtraMinutes">Today adjust min (+/-)</label>
             <input id="adminExtraMinutes" type="number" value="15" />
           </div>
+          <div class="field col-12">
+            <div class="week-group">
+              <label>Quota (min/day) — Sun · Mon · Tue · Wed · Thu · Fri · Sat</label>
+              <div class="week-grid" id="admQuotaGrid"></div>
+            </div>
+          </div>
+          <div class="field col-12">
+            <div class="week-group">
+              <label>Carryover cap (min/day) — Sun · Mon · Tue · Wed · Thu · Fri · Sat</label>
+              <div class="week-grid" id="admCapGrid"></div>
+            </div>
+          </div>
+          <div class="field col-12">
+            <div class="week-group">
+              <label>Curfew — Off &amp; On time per day (leave Off empty for no curfew that day)</label>
+              <div class="curfew-row" id="admCurfewGrid"></div>
+            </div>
+          </div>
         </div>
         <div class="inline">
           <button id="setQuotaBtn" class="btn-neutral">Set Quota</button>
           <button id="setCarryoverCapBtn" class="btn-neutral">Set Carryover Cap</button>
+          <button id="setCurfewBtn" class="btn-neutral">Set Curfew</button>
           <button id="grantExtraBtn" class="btn-neutral">Adjust Today Minutes</button>
           <button id="setPasswordBtn" class="btn-neutral">Set Password</button>
           <button id="refreshUsersBtn" class="btn-neutral">Refresh Users</button>
@@ -295,8 +386,11 @@
               <tr>
                 <th>Username</th>
                 <th>Role</th>
-                <th>Quota (min)</th>
-                <th>Carry Cap (min)</th>
+                <th>Today Quota</th>
+                <th>Today Cap</th>
+                <th>Curfew Today</th>
+                <th>Weekly Quota (S M T W T F S)</th>
+                <th>Weekly Cap (S M T W T F S)</th>
                 <th>Carry (min)</th>
                 <th>Extra Today (min)</th>
                 <th>Used (min)</th>
@@ -316,6 +410,69 @@
   <script>
     function fmtMinutes(seconds) {
       return Math.floor(seconds / 60);
+    }
+
+    const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+    function buildWeekGrid(containerId, prefix, defaultVal) {
+      const grid = document.getElementById(containerId);
+      grid.innerHTML = '';
+      DAY_NAMES.forEach((name, i) => {
+        const cell = document.createElement('div');
+        cell.className = 'day-cell';
+        cell.innerHTML = `<label for="${prefix}-${i}">${name}</label>
+          <input id="${prefix}-${i}" type="number" min="0" value="${defaultVal}" />`;
+        grid.appendChild(cell);
+      });
+    }
+
+    function buildCurfewGrid(containerId, prefix) {
+      const grid = document.getElementById(containerId);
+      grid.innerHTML = '';
+      DAY_NAMES.forEach((name, i) => {
+        const cell = document.createElement('div');
+        cell.className = 'day-cell';
+        cell.innerHTML = `
+          <span style="font-size:0.76rem;color:var(--muted);font-weight:600;">${name}</span>
+          <span class="sub-label">Off</span>
+          <input id="${prefix}-off-${i}" type="time" title="Curfew starts; leave empty for no curfew" />
+          <span class="sub-label">On</span>
+          <input id="${prefix}-on-${i}" type="time" title="User allowed to turn internet on again" />
+        `;
+        grid.appendChild(cell);
+      });
+    }
+
+    function getWeeklyValues(prefix) {
+      return DAY_NAMES.map((_, i) => Number(document.getElementById(`${prefix}-${i}`).value));
+    }
+
+    function setWeeklyValues(prefix, arr) {
+      DAY_NAMES.forEach((_, i) => {
+        const el = document.getElementById(`${prefix}-${i}`);
+        if (el) el.value = arr ? (arr[i] ?? 0) : 0;
+      });
+    }
+
+    function getCurfewValues(prefix) {
+      return DAY_NAMES.map((_, i) => ({
+        off_time: document.getElementById(`${prefix}-off-${i}`).value,
+        on_time:  document.getElementById(`${prefix}-on-${i}`).value
+      }));
+    }
+
+    function setCurfewValues(prefix, arr) {
+      DAY_NAMES.forEach((_, i) => {
+        const offEl = document.getElementById(`${prefix}-off-${i}`);
+        const onEl  = document.getElementById(`${prefix}-on-${i}`);
+        if (offEl) offEl.value = arr ? (arr[i]?.off_time || '') : '';
+        if (onEl)  onEl.value  = arr ? (arr[i]?.on_time  || '') : '';
+      });
+    }
+
+    function fmtWeekly(arr) {
+      if (!arr) return '—';
+      return arr.map((v, i) => `${DAY_NAMES[i]}:${v}`).join(' ');
     }
 
     async function api(path, options = {}) {
@@ -362,15 +519,22 @@
     function renderMe() {
       if (!state.me) return;
       document.getElementById("meSummary").textContent = `${state.me.username} (${state.me.role})`;
+      const inCurfew = state.me.in_curfew;
       document.getElementById("internetState").innerHTML = state.me.internet_on
         ? '<span class="badge ok">ON</span>'
         : '<span class="badge off">OFF</span>';
-      document.getElementById("quotaState").textContent = `${state.me.daily_quota_minutes} min/day`;
+      document.getElementById("quotaState").textContent = `${state.me.today_quota_minutes} min`;
       document.getElementById("remainingState").textContent = `${fmtMinutes(state.me.remaining_seconds)} min`;
-      document.getElementById("carryoverCapState").textContent = `${state.me.carryover_cap_minutes} min`;
+      document.getElementById("carryoverCapState").textContent = `${state.me.today_carryover_cap_minutes} min`;
       document.getElementById("carryoverState").textContent = `${fmtMinutes(state.me.carryover_seconds)} min`;
       document.getElementById("extraTodayState").textContent = `${fmtMinutes(state.me.extra_seconds_today)} min`;
-      document.getElementById("onBtn").disabled = state.me.internet_on;
+      document.getElementById("curfewState").innerHTML = inCurfew
+        ? '<span class="badge off">BLOCKED</span>'
+        : '<span class="badge ok">Clear</span>';
+      const tc = state.me.today_curfew || {};
+      document.getElementById("curfewWindowState").textContent =
+        tc.off_time ? `${tc.off_time} → ${tc.on_time || '(midnight)'}` : 'None';
+      document.getElementById("onBtn").disabled = state.me.internet_on || inCurfew;
       document.getElementById("offBtn").disabled = !state.me.internet_on;
     }
 
@@ -378,18 +542,36 @@
       const body = document.getElementById("usersBody");
       body.innerHTML = "";
       for (const u of state.users) {
+        const tc = u.today_curfew || {};
+        const curfewLabel = u.in_curfew
+          ? '<span class="badge off">CURFEW</span>'
+          : (tc.off_time ? `${tc.off_time}→${tc.on_time || 'midnight'}` : '—');
         const tr = document.createElement("tr");
+        tr.className = 'selectable';
+        tr.title = 'Click to pre-fill manage form';
         tr.innerHTML = `
           <td>${u.username}</td>
           <td>${u.role}</td>
-          <td>${u.daily_quota_minutes}</td>
-          <td>${u.carryover_cap_minutes}</td>
+          <td>${u.today_quota_minutes}</td>
+          <td>${u.today_carryover_cap_minutes}</td>
+          <td>${curfewLabel}</td>
+          <td title="${fmtWeekly(u.weekly_quota_minutes)}">${(u.weekly_quota_minutes || []).join(' · ')}</td>
+          <td title="${fmtWeekly(u.weekly_carryover_cap_minutes)}">${(u.weekly_carryover_cap_minutes || []).join(' · ')}</td>
           <td>${fmtMinutes(u.carryover_seconds)}</td>
           <td>${fmtMinutes(u.extra_seconds_today)}</td>
           <td>${fmtMinutes(u.used_seconds)}</td>
           <td>${fmtMinutes(u.remaining_seconds)}</td>
           <td>${u.internet_on ? "ON" : "OFF"}</td>
         `;
+        tr.addEventListener('click', () => {
+          document.querySelectorAll('#usersBody tr').forEach(r => r.classList.remove('row-selected'));
+          tr.classList.add('row-selected');
+          document.getElementById('adminUsername').value = u.username;
+          setWeeklyValues('adm-quota', u.weekly_quota_minutes);
+          setWeeklyValues('adm-cap', u.weekly_carryover_cap_minutes);
+          setCurfewValues('adm-curfew', u.weekly_curfew);
+          setMsg(adminMsg, `Pre-filled form for ${u.username}`);
+        });
         body.appendChild(tr);
       }
     }
@@ -477,8 +659,9 @@
             username: document.getElementById("newUsername").value.trim(),
             password: document.getElementById("newPassword").value,
             role: document.getElementById("newRole").value,
-            daily_quota_minutes: Number(document.getElementById("newQuota").value),
-            carryover_cap_minutes: Number(document.getElementById("newCarryoverCap").value)
+            weekly_quota_minutes: getWeeklyValues('new-quota'),
+            weekly_carryover_cap_minutes: getWeeklyValues('new-cap'),
+            weekly_curfew: getCurfewValues('new-curfew')
           })
         });
         await loadUsers();
@@ -495,7 +678,7 @@
         await api(`/api/admin/users/${encodeURIComponent(user)}/quota`, {
           method: "PUT",
           body: JSON.stringify({
-            daily_quota_minutes: Number(document.getElementById("adminQuota").value)
+            weekly_quota_minutes: getWeeklyValues('adm-quota')
           })
         });
         await loadUsers();
@@ -531,7 +714,7 @@
         await api(`/api/admin/users/${encodeURIComponent(user)}/carryover-cap`, {
           method: "PUT",
           body: JSON.stringify({
-            carryover_cap_minutes: Number(document.getElementById("adminCarryoverCap").value)
+            weekly_carryover_cap_minutes: getWeeklyValues('adm-cap')
           })
         });
         await loadUsers();
@@ -539,6 +722,24 @@
           await loadMe();
         }
         setMsg(adminMsg, "Carryover cap updated");
+      } catch (err) {
+        setMsg(adminMsg, err.message, true);
+      }
+    });
+
+    document.getElementById("setCurfewBtn").addEventListener("click", async () => {
+      setMsg(adminMsg, "");
+      const user = document.getElementById("adminUsername").value.trim();
+      try {
+        await api(`/api/admin/users/${encodeURIComponent(user)}/curfew`, {
+          method: "PUT",
+          body: JSON.stringify({ weekly_curfew: getCurfewValues('adm-curfew') })
+        });
+        await loadUsers();
+        if (state.me && state.me.username === user) {
+          await loadMe();
+        }
+        setMsg(adminMsg, "Curfew updated");
       } catch (err) {
         setMsg(adminMsg, err.message, true);
       }
@@ -582,6 +783,14 @@
         location.reload();
       }
     }, 10000);
+
+    // Build weekly grid inputs
+    buildWeekGrid('newQuotaGrid', 'new-quota', 60);
+    buildWeekGrid('newCapGrid',   'new-cap',   0);
+    buildWeekGrid('admQuotaGrid', 'adm-quota', 60);
+    buildWeekGrid('admCapGrid',   'adm-cap',   0);
+    buildCurfewGrid('newCurfewGrid', 'new-curfew');
+    buildCurfewGrid('admCurfewGrid', 'adm-curfew');
 
     tryRestoreSession();
   </script>

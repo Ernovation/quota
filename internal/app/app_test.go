@@ -57,20 +57,20 @@ func TestNextQuotaCheckDelayUsesEarliestUserDeadline(t *testing.T) {
 
 	a.mu.Lock()
 	a.state.Users["user-fast"] = &User{
-		Username:          "user-fast",
-		Role:              RoleUser,
-		DailyQuotaMinutes: 1, // 60 seconds total
-		UsedSeconds:       20,
-		InternetOn:        true,
-		LastOnUnix:        nowUnix - 10, // effective used = 30, remaining = 30s
+		Username:           "user-fast",
+		Role:               RoleUser,
+		WeeklyQuotaMinutes: [7]int{1, 1, 1, 1, 1, 1, 1}, // 60 seconds total per day
+		UsedSeconds:        20,
+		InternetOn:         true,
+		LastOnUnix:         nowUnix - 10, // effective used = 30, remaining = 30s
 	}
 	a.state.Users["user-slow"] = &User{
-		Username:          "user-slow",
-		Role:              RoleUser,
-		DailyQuotaMinutes: 5,
-		UsedSeconds:       0,
-		InternetOn:        true,
-		LastOnUnix:        nowUnix,
+		Username:           "user-slow",
+		Role:               RoleUser,
+		WeeklyQuotaMinutes: [7]int{5, 5, 5, 5, 5, 5, 5},
+		UsedSeconds:        0,
+		InternetOn:         true,
+		LastOnUnix:         nowUnix,
 	}
 	a.mu.Unlock()
 
@@ -87,12 +87,12 @@ func TestNextQuotaCheckDelayReturnsImmediateForExhaustedUser(t *testing.T) {
 
 	a.mu.Lock()
 	a.state.Users["exhausted"] = &User{
-		Username:          "exhausted",
-		Role:              RoleUser,
-		DailyQuotaMinutes: 1,
-		UsedSeconds:       60,
-		InternetOn:        true,
-		LastOnUnix:        nowUnix,
+		Username:           "exhausted",
+		Role:               RoleUser,
+		WeeklyQuotaMinutes: [7]int{1, 1, 1, 1, 1, 1, 1},
+		UsedSeconds:        60,
+		InternetOn:         true,
+		LastOnUnix:         nowUnix,
 	}
 	a.mu.Unlock()
 
@@ -120,10 +120,10 @@ func TestSyncUsageLockedUpdatesUsedAndTimestamp(t *testing.T) {
 	nowUnix := time.Now().Unix()
 
 	u := &User{
-		Username:   "u",
-		InternetOn: true,
+		Username:    "u",
+		InternetOn:  true,
 		UsedSeconds: 7,
-		LastOnUnix: nowUnix - 13,
+		LastOnUnix:  nowUnix - 13,
 	}
 
 	a.syncUsageLocked(u, nowUnix)
@@ -140,8 +140,8 @@ func TestSetQuotaSignalsScheduler(t *testing.T) {
 	a := newTestApp(t)
 	drainQuotaWake(a)
 
-	if err := a.setQuota("admin", 1440); err != nil {
-		t.Fatalf("setQuota error = %v", err)
+	if err := a.setWeeklyQuota("admin", [7]int{1440, 1440, 1440, 1440, 1440, 1440, 1440}); err != nil {
+		t.Fatalf("setWeeklyQuota error = %v", err)
 	}
 
 	if got := len(a.quotaWake); got != 1 {
